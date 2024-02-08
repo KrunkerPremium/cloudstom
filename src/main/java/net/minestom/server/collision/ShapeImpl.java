@@ -14,8 +14,8 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-final class ShapeImpl implements Shape {
-    private static final Pattern PATTERN = Pattern.compile("\\d.\\d{1,3}", Pattern.MULTILINE);
+public final class ShapeImpl implements Shape {
+    private static final Pattern PATTERN = Pattern.compile("\\d.\\d+", Pattern.MULTILINE);
     private final BoundingBox[] collisionBoundingBoxes;
     private final Point relativeStart, relativeEnd;
 
@@ -61,7 +61,7 @@ final class ShapeImpl implements Shape {
         this.blockOcclusion = fullFaces;
     }
 
-    static private BoundingBox[] parseRegistryBoundingBoxString(String str) {
+    private static BoundingBox[] parseRegistryBoundingBoxString(String str) {
         final Matcher matcher = PATTERN.matcher(str);
         DoubleList vals = new DoubleArrayList();
         while (matcher.find()) {
@@ -151,6 +151,11 @@ final class ShapeImpl implements Shape {
     }
 
     @Override
+    public boolean isFaceFull(@NotNull BlockFace face) {
+        return (((blockOcclusion >> face.ordinal()) & 1) == 1);
+    }
+
+    @Override
     public boolean intersectBox(@NotNull Point position, @NotNull BoundingBox boundingBox) {
         for (BoundingBox blockSection : collisionBoundingBoxes) {
             if (boundingBox.intersectBox(position, blockSection)) return true;
@@ -165,16 +170,15 @@ final class ShapeImpl implements Shape {
         for (BoundingBox blockSection : collisionBoundingBoxes) {
             // Update final result if the temp result collision is sooner than the current final result
             if (RayUtils.BoundingBoxIntersectionCheck(moving, rayStart, rayDirection, blockSection, shapePos, finalResult)) {
-                finalResult.collidedShapePosition = shapePos;
+                finalResult.collidedPosition = rayStart.add(rayDirection.mul(finalResult.res));
                 finalResult.collidedShape = this;
-                finalResult.blockType = block();
                 hitBlock = true;
             }
         }
         return hitBlock;
     }
 
-    private Block block() {
+    public Block block() {
         Block block = this.block;
         if (block == null) this.block = block = Block.fromStateId((short) blockEntry.stateId());
         return block;

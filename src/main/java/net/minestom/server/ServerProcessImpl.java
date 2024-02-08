@@ -14,6 +14,7 @@ import net.minestom.server.instance.Chunk;
 import net.minestom.server.instance.Instance;
 import net.minestom.server.instance.InstanceManager;
 import net.minestom.server.instance.block.BlockManager;
+import net.minestom.server.item.armor.TrimManager;
 import net.minestom.server.listener.manager.PacketListenerManager;
 import net.minestom.server.monitoring.BenchmarkManager;
 import net.minestom.server.monitoring.TickMonitor;
@@ -27,6 +28,7 @@ import net.minestom.server.thread.Acquirable;
 import net.minestom.server.thread.ThreadDispatcher;
 import net.minestom.server.timer.SchedulerManager;
 import net.minestom.server.utils.PacketUtils;
+import net.minestom.server.utils.PropertyUtils;
 import net.minestom.server.utils.collection.MappedCollection;
 import net.minestom.server.world.DimensionTypeManager;
 import net.minestom.server.world.biomes.BiomeManager;
@@ -42,12 +44,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class ServerProcessImpl implements ServerProcess {
-    private final static Logger LOGGER = LoggerFactory.getLogger(ServerProcessImpl.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServerProcessImpl.class);
+    private static final Boolean SHUTDOWN_ON_SIGNAL = PropertyUtils.getBoolean("minestom.shutdown-on-signal", true);
 
     private final ExceptionManager exception;
     private final ConnectionManager connection;
-    private final PacketProcessor packetProcessor;
     private final PacketListenerManager packetListener;
+    private final PacketProcessor packetProcessor;
     private final InstanceManager instance;
     private final BlockManager block;
     private final CommandManager command;
@@ -61,6 +64,7 @@ final class ServerProcessImpl implements ServerProcess {
     private final AdvancementManager advancement;
     private final BossBarManager bossBar;
     private final TagManager tag;
+    private final TrimManager trim;
     private final Server server;
 
     private final ThreadDispatcher<Chunk> dispatcher;
@@ -72,8 +76,8 @@ final class ServerProcessImpl implements ServerProcess {
     public ServerProcessImpl() throws IOException {
         this.exception = new ExceptionManager();
         this.connection = new ConnectionManager();
-        this.packetProcessor = new PacketProcessor();
-        this.packetListener = new PacketListenerManager(this);
+        this.packetListener = new PacketListenerManager();
+        this.packetProcessor = new PacketProcessor(packetListener);
         this.instance = new InstanceManager();
         this.block = new BlockManager();
         this.command = new CommandManager();
@@ -87,6 +91,7 @@ final class ServerProcessImpl implements ServerProcess {
         this.advancement = new AdvancementManager();
         this.bossBar = new BossBarManager();
         this.tag = new TagManager();
+        this.trim = new TrimManager();
         this.server = new Server(packetProcessor);
 
         this.dispatcher = ThreadDispatcher.singleThread();
@@ -164,6 +169,11 @@ final class ServerProcessImpl implements ServerProcess {
     }
 
     @Override
+    public @NotNull TrimManager trim() {
+        return trim;
+    }
+
+    @Override
     public @NotNull ExceptionManager exception() {
         return exception;
     }
@@ -215,7 +225,7 @@ final class ServerProcessImpl implements ServerProcess {
         LOGGER.info(MinecraftServer.getBrandName() + " server started successfully.");
 
         // Stop the server on SIGINT
-        Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
+        if (SHUTDOWN_ON_SIGNAL) Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
     }
 
     @Override
@@ -257,17 +267,17 @@ final class ServerProcessImpl implements ServerProcess {
 
             scheduler().processTick();
 
-            // Waiting players update (newly connected clients waiting to get into the server)
-            connection().updateWaitingPlayers();
-
-            // Keep Alive Handling
-            connection().handleKeepAlive(msTime);
+            // Connection tick (let waiting clients in, send keep alives, handle configuration players packets)
+            connection().tick(msTime);
 
             // Server tick (chunks/entities)
             serverTick(msTime);
 
             // Flush all waiting packets
             PacketUtils.flush();
+
+            // Server connection tick
+            server().tick();
 
             // Monitoring
             {

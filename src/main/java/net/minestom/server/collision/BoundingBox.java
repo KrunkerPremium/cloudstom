@@ -9,6 +9,8 @@ import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Iterator;
+
 /**
  * See https://wiki.vg/Entity_metadata#Mobs_2
  */
@@ -51,9 +53,8 @@ public final class BoundingBox implements Shape {
     @ApiStatus.Experimental
     public boolean intersectBoxSwept(@NotNull Point rayStart, @NotNull Point rayDirection, @NotNull Point shapePos, @NotNull BoundingBox moving, @NotNull SweepResult finalResult) {
         if (RayUtils.BoundingBoxIntersectionCheck(moving, rayStart, rayDirection, this, shapePos, finalResult) ) {
-            finalResult.collidedShapePosition = shapePos;
+            finalResult.collidedPosition = rayStart.add(rayDirection.mul(finalResult.res));
             finalResult.collidedShape = this;
-            finalResult.blockType = null;
             return true;
         }
 
@@ -158,6 +159,79 @@ public final class BoundingBox implements Shape {
 
     public double maxZ() {
         return relativeEnd().z();
+    }
+
+    public enum AxisMask {
+        X,
+        Y,
+        Z,
+        NONE
+    }
+
+    public Iterator<Point> getBlocks(Point point) {
+        return new PointIterator(this, point, AxisMask.NONE, 0);
+    }
+
+    public Iterator<Point> getBlocks(Point point, AxisMask axisMask, double axis) {
+        return new PointIterator(this, point, axisMask, axis);
+    }
+
+    static class PointIterator implements Iterator<Point> {
+        private final double sx, sy, sz;
+        double x, y, z;
+        private double minX, minY, minZ, maxX, maxY, maxZ;
+
+        public PointIterator(BoundingBox boundingBox, Point p, AxisMask axisMask, double axis) {
+            minX = (int) Math.floor(boundingBox.minX() + p.x());
+            minY = (int) Math.floor(boundingBox.minY() + p.y());
+            minZ = (int) Math.floor(boundingBox.minZ() + p.z());
+            maxX = (int) Math.floor(boundingBox.maxX() + p.x());
+            maxY = (int) Math.floor(boundingBox.maxY() + p.y());
+            maxZ = (int) Math.floor(boundingBox.maxZ() + p.z());
+
+            x = minX;
+            y = minY;
+            z = minZ;
+
+            sx = boundingBox.minX() + p.x() - minX;
+            sy = boundingBox.minY() + p.y() - minY;
+            sz = boundingBox.minZ() + p.z() - minZ;
+
+            if (axisMask == AxisMask.X) {
+                x = axis + p.x();
+                minX = x;
+                maxX = x;
+            } else if (axisMask == AxisMask.Y) {
+                y = axis + p.y();
+                minY = y;
+                maxY = y;
+            } else if (axisMask == AxisMask.Z) {
+                z = axis + p.z();
+                minZ = z;
+                maxZ = z;
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            return x <= maxX && y <= maxY && z <= maxZ;
+        }
+
+        @Override
+        public Point next() {
+            var res = new Vec(x + sx, y + sy, z + sz);
+
+            x++;
+            if (x > maxX) {
+                x = minX;
+                y++;
+                if (y > maxY) {
+                    y = minY;
+                    z++;
+                }
+            }
+            return res;
+        }
     }
 
     @Override

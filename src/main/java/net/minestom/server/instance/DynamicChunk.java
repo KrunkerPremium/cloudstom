@@ -4,6 +4,7 @@ import com.extollit.gaming.ai.path.model.ColumnarOcclusionFieldList;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import net.minestom.server.MinecraftServer;
 import net.minestom.server.coordinate.Point;
+import net.minestom.server.coordinate.Vec;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.Player;
 import net.minestom.server.entity.pathfinding.PFBlock;
@@ -11,6 +12,7 @@ import net.minestom.server.instance.block.Block;
 import net.minestom.server.instance.block.BlockHandler;
 import net.minestom.server.network.NetworkBuffer;
 import net.minestom.server.network.packet.server.CachedPacket;
+import net.minestom.server.network.packet.server.SendablePacket;
 import net.minestom.server.network.packet.server.play.ChunkDataPacket;
 import net.minestom.server.network.packet.server.play.UpdateLightPacket;
 import net.minestom.server.network.packet.server.play.data.ChunkData;
@@ -22,11 +24,14 @@ import net.minestom.server.utils.ArrayUtils;
 import net.minestom.server.utils.MathUtils;
 import net.minestom.server.utils.ObjectPool;
 import net.minestom.server.utils.chunk.ChunkUtils;
+import net.minestom.server.utils.validate.Check;
 import net.minestom.server.world.biomes.Biome;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jglrxavpok.hephaistos.nbt.NBT;
 import org.jglrxavpok.hephaistos.nbt.NBTCompound;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
@@ -38,6 +43,7 @@ import static net.minestom.server.utils.chunk.ChunkUtils.toSectionRelativeCoordi
  * WARNING: not thread-safe.
  */
 public class DynamicChunk extends Chunk {
+    private static final Logger LOGGER = LoggerFactory.getLogger(DynamicChunk.class);
 
     protected List<Section> sections;
 
@@ -56,8 +62,16 @@ public class DynamicChunk extends Chunk {
     }
 
     @Override
-    public void setBlock(int x, int y, int z, @NotNull Block block) {
+    public void setBlock(int x, int y, int z, @NotNull Block block,
+                         @Nullable BlockHandler.Placement placement,
+                         @Nullable BlockHandler.Destroy destroy) {
+        if(y >= instance.getDimensionType().getMaxY() || y < instance.getDimensionType().getMinY()) {
+            LOGGER.warn("tried to set a block outside the world bounds, should be within [{}, {}): {}",
+                    instance.getDimensionType().getMinY(), instance.getDimensionType().getMaxY(), y);
+            return;
+        }
         assertLock();
+
         this.lastChange = System.currentTimeMillis();
         this.chunkCache.invalidate();
 
@@ -68,16 +82,21 @@ public class DynamicChunk extends Chunk {
             columnarOcclusionFieldList.onBlockChanged(x, y, z, blockDescription, 0);
         }
         Section section = getSectionAt(y);
-        section.blockPalette()
-                .set(toSectionRelativeCoordinate(x), toSectionRelativeCoordinate(y), toSectionRelativeCoordinate(z), block.stateId());
+        section.blockPalette().set(
+                toSectionRelativeCoordinate(x),
+                toSectionRelativeCoordinate(y),
+                toSectionRelativeCoordinate(z),
+                block.stateId()
+        );
 
         final int index = ChunkUtils.getBlockIndex(x, y, z);
         // Handler
         final BlockHandler handler = block.handler();
+        final Block lastCachedBlock;
         if (handler != null || block.hasNbt() || block.registry().isBlockEntity()) {
-            this.entries.put(index, block);
+            lastCachedBlock = this.entries.put(index, block);
         } else {
-            this.entries.remove(index);
+            lastCachedBlock = this.entries.remove(index);
         }
         // Block tick
         if (handler != null && handler.isTickable()) {
@@ -85,6 +104,21 @@ public class DynamicChunk extends Chunk {
         } else {
             this.tickableMap.remove(index);
         }
+
+        // Update block handlers
+        var blockPosition = new Vec(x, y, z);
+        if (lastCachedBlock != null && lastCachedBlock.handler() != null) {
+            // Previous destroy
+            lastCachedBlock.handler().onDestroy(Objects.requireNonNullElseGet(destroy,
+                    () -> new BlockHandler.Destroy(lastCachedBlock, instance, blockPosition)));
+        }
+        if (handler != null) {
+            // New placement
+            final Block finalBlock = block;
+            handler.onPlace(Objects.requireNonNullElseGet(placement,
+                    () -> new BlockHandler.Placement(finalBlock, instance, blockPosition)));
+        }
+
     }
 
     @Override
@@ -157,15 +191,8 @@ public class DynamicChunk extends Chunk {
     }
 
     @Override
-    public void sendChunk(@NotNull Player player) {
-        if (!isLoaded()) return;
-        player.sendPacket(chunkCache);
-    }
-
-    @Override
-    public void sendChunk() {
-        if (!isLoaded()) return;
-        sendPacketToViewers(chunkCache);
+    public @NotNull SendablePacket getFullDataPacket() {
+        return chunkCache;
     }
 
     @Override
@@ -183,24 +210,7 @@ public class DynamicChunk extends Chunk {
     }
 
     private @NotNull ChunkDataPacket createChunkPacket() {
-        final NBTCompound heightmapsNBT;
-        // TODO: don't hardcode heightmaps
-        // Heightmap
-        {
-            int dimensionHeight = getInstance().getDimensionType().getHeight();
-            int[] motionBlocking = new int[16 * 16];
-            int[] worldSurface = new int[16 * 16];
-            for (int x = 0; x < 16; x++) {
-                for (int z = 0; z < 16; z++) {
-                    motionBlocking[x + z * 16] = 0;
-                    worldSurface[x + z * 16] = dimensionHeight - 1;
-                }
-            }
-            final int bitsForHeight = MathUtils.bitsToRepresent(dimensionHeight);
-            heightmapsNBT = NBT.Compound(Map.of(
-                    "MOTION_BLOCKING", NBT.LongArray(encodeBlocks(motionBlocking, bitsForHeight)),
-                    "WORLD_SURFACE", NBT.LongArray(encodeBlocks(worldSurface, bitsForHeight))));
-        }
+        final NBTCompound heightmapsNBT = computeHeightmap();
         // Data
 
         final byte[] data;
@@ -211,44 +221,35 @@ public class DynamicChunk extends Chunk {
                     }));
         }
 
-        if (this instanceof LightingChunk light) {
-            if (light.lightCache.isValid()) {
-                return new ChunkDataPacket(chunkX, chunkZ,
-                        new ChunkData(heightmapsNBT, data, entries),
-                        createLightData(true));
-            } else {
-                // System.out.println("Regenerating light for chunk " + chunkX + " " + chunkZ);
-                LightingChunk.updateAfterGeneration(light);
-                return new ChunkDataPacket(chunkX, chunkZ,
-                        new ChunkData(heightmapsNBT, data, entries),
-                        createEmptyLight());
-            }
-        }
-
         return new ChunkDataPacket(chunkX, chunkZ,
                 new ChunkData(heightmapsNBT, data, entries),
-                createLightData(true)
+                createLightData()
         );
     }
 
+    protected NBTCompound computeHeightmap() {
+        // TODO: don't hardcode heightmaps
+        // Heightmap
+        int dimensionHeight = getInstance().getDimensionType().getHeight();
+        int[] motionBlocking = new int[16 * 16];
+        int[] worldSurface = new int[16 * 16];
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                motionBlocking[x + z * 16] = 0;
+                worldSurface[x + z * 16] = dimensionHeight - 1;
+            }
+        }
+        final int bitsForHeight = MathUtils.bitsToRepresent(dimensionHeight);
+        return NBT.Compound(Map.of(
+                "MOTION_BLOCKING", NBT.LongArray(encodeBlocks(motionBlocking, bitsForHeight)),
+                "WORLD_SURFACE", NBT.LongArray(encodeBlocks(worldSurface, bitsForHeight))));
+    }
+
     @NotNull UpdateLightPacket createLightPacket() {
-        return new UpdateLightPacket(chunkX, chunkZ, createLightData(false));
+        return new UpdateLightPacket(chunkX, chunkZ, createLightData());
     }
 
-    private LightData createEmptyLight() {
-        BitSet skyMask = new BitSet();
-        BitSet blockMask = new BitSet();
-        BitSet emptySkyMask = new BitSet();
-        BitSet emptyBlockMask = new BitSet();
-        List<byte[]> skyLights = new ArrayList<>();
-        List<byte[]> blockLights = new ArrayList<>();
-
-        return new LightData(skyMask, blockMask,
-                emptySkyMask, emptyBlockMask,
-                skyLights, blockLights);
-    }
-
-    protected LightData createLightData(boolean sendLater) {
+    protected LightData createLightData() {
         BitSet skyMask = new BitSet();
         BitSet blockMask = new BitSet();
         BitSet emptySkyMask = new BitSet();
@@ -319,7 +320,7 @@ public class DynamicChunk extends Chunk {
             70409299, 70409299, 0, 69273666, 69273666, 0, 68174084, 68174084, 0, Integer.MIN_VALUE,
             0, 5};
 
-    private static long[] encodeBlocks(int[] blocks, int bitsPerEntry) {
+    static long[] encodeBlocks(int[] blocks, int bitsPerEntry) {
         final long maxEntryValue = (1L << bitsPerEntry) - 1;
         final char valuesPerLong = (char) (64 / bitsPerEntry);
         final int magicIndex = 3 * (valuesPerLong - 1);
